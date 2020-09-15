@@ -194,56 +194,11 @@ class AmgXSolver
         /** \brief The name of the node that this MPI process belongs to. */
         std::string             nodeName;
 
-
-
-
-        /** \brief Number of local GPU devices used by AmgX.*/
-        PetscMPIInt             nDevs;
-
-        /** \brief The ID of corresponding GPU device used by this MPI process. */
+        /** \brief MPI info.*/
+        MPI_Comm                world;
+        PetscMPIInt             world_rank;
+        PetscMPIInt             world_size;
         PetscMPIInt             devID;
-
-        /** \brief A flag indicating if this process will talk to GPU. */
-        PetscMPIInt             gpuProc = MPI_UNDEFINED;
-
-        /** \brief A communicator for global world. */
-        MPI_Comm                globalCpuWorld;
-
-        /** \brief A communicator for local world (i.e., in-node). */
-        MPI_Comm                localCpuWorld;
-
-        /** \brief A communicator for MPI processes that can talk to GPUs. */
-        MPI_Comm                gpuWorld;
-
-        /** \brief A communicator for processes sharing the same devices. */
-        MPI_Comm                devWorld;
-
-        /** \brief Size of \ref AmgXSolver::globalCpuWorld "globalCpuWorld". */
-        PetscMPIInt             globalSize;
-
-        /** \brief Size of \ref AmgXSolver::localCpuWorld "localCpuWorld". */
-        PetscMPIInt             localSize;
-
-        /** \brief Size of \ref AmgXSolver::gpuWorld "gpuWorld". */
-        PetscMPIInt             gpuWorldSize;
-
-        /** \brief Size of \ref AmgXSolver::devWorld "devWorld". */
-        PetscMPIInt             devWorldSize;
-
-        /** \brief Rank in \ref AmgXSolver::globalCpuWorld "globalCpuWorld". */
-        PetscMPIInt             myGlobalRank;
-
-        /** \brief Rank in \ref AmgXSolver::localCpuWorld "localCpuWorld". */
-        PetscMPIInt             myLocalRank;
-
-        /** \brief Rank in \ref AmgXSolver::gpuWorld "gpuWorld". */
-        PetscMPIInt             myGpuWorldRank;
-
-        /** \brief Rank in \ref AmgXSolver::devWorld "devWorld". */
-        PetscMPIInt             myDevWorldRank;
-
-
-
 
         /** \brief A parameter used by AmgX. */
         int                     ring;
@@ -275,25 +230,6 @@ class AmgXSolver
         static AMGX_resources_handle   rsrc;
 
 
-
-
-        /** \brief A VecScatter for gathering/scattering between original PETSc
-         *         Vec and temporary redistributed PETSc Vec.*/
-        VecScatter              scatterLhs = nullptr;
-
-        /** \brief A VecScatter for gathering/scattering between original PETSc
-         *         Vec and temporary redistributed PETSc Vec.*/
-        VecScatter              scatterRhs = nullptr;
-
-        /** \brief A temporary PETSc Vec holding redistributed unknowns. */
-        Vec                     redistLhs = nullptr;
-
-        /** \brief A temporary PETSc Vec holding redistributed RHS. */
-        Vec                     redistRhs = nullptr;
-
-
-
-
         /** \brief Set AmgX solver mode based on the user-provided string.
          *
          * Available modes are: dDDI, dDFI, dFFI, hDDI, hDFI, hFFI.
@@ -302,20 +238,6 @@ class AmgXSolver
          * \return PetscErrorCode.
          */
         PetscErrorCode setMode(const std::string &modeStr);
-
-
-        /** \brief Get the number of GPU devices on this computing node.
-         *
-         * \return PetscErrorCode.
-         */
-        PetscErrorCode setDeviceCount();
-
-
-        /** \brief Set the ID of the corresponding GPU used by this process.
-         *
-         * \return PetscErrorCode.
-         */
-        PetscErrorCode setDeviceIDs();
 
 
         /** \brief Initialize all MPI communicators.
@@ -371,17 +293,6 @@ class AmgXSolver
         PetscErrorCode redistMat(const Mat &A, const IS &devIS, Mat &newA);
 
 
-        /** \brief Get \ref AmgXSolver::scatterLhs "scatterLhs" and
-         *      \ref AmgXSolver::scatterRhs "scatterRhs".
-         *
-         * \param A1 [in] Original PETSc Mat object.
-         * \param A2 [in] Redistributed PETSc Mat object.
-         * \param devIS [in] PETSc IS representing redistributed row indices.
-         * \return PetscErrorCode.
-         */
-        PetscErrorCode getVecScatter(const Mat &A1, const Mat &A2, const IS &devIS);
-
-
         /** \brief Get data of compressed row layout of local sparse matrix.
          *
          * \param localA [in] Sequential local redistributed PETSc Mat.
@@ -426,24 +337,10 @@ class AmgXSolver
          * \param N [in] Total number of rows in global matrix.
          * \param partData [out] Partition data, either explicit vector or offsets.
          * \param usesOffsets [out] If PETSC_TRUE, partitioning is contiguous and partData contains
-         *      partition offsets, see checkForContiguousPartitioning(). Otherwise, contains explicit 
+         *      partition offsets, see checkForContiguousPartitioning(). Otherwise, contains explicit
          *      partition vector.
          * \return PetscErrorCode.
          */
         PetscErrorCode getPartData(const IS &devIS,
                 const PetscInt &N, std::vector<PetscInt> &partData, PetscBool &usesOffsets);
-
-
-        /** \brief Function that actually solves the system.
-         *
-         * This function won't check if the process is involved in AmgX solver.
-         * So if calling this function from processes not in the
-         * \ref AmgXSolver::gpuWorld "gpuWorld", something bad will happen.
-         * This function hence won't do data gathering/scattering, either.
-         *
-         * \param p [in, out] PETSc Vec for unknowns.
-         * \param b [in] PETSc Vec for RHS.
-         * \return PetscErrorCode.
-         */
-        PetscErrorCode solve_real(Vec &p, Vec &b);
 };

@@ -58,9 +58,9 @@ PetscErrorCode AmgXSolver::setA(const Mat &A)
 
 
     // upload matrix A to AmgX
-    if (gpuWorld != MPI_COMM_NULL)
+    if (world != MPI_COMM_NULL)
     {
-        ierr = MPI_Barrier(gpuWorld); CHK;
+        ierr = MPI_Barrier(world); CHK;
         // offsets need to be 64 bit, since we use 64 bit column indices
         std::vector<PetscInt64> offsets;
 
@@ -79,14 +79,14 @@ PetscErrorCode AmgXSolver::setA(const Mat &A)
         AMGX_distribution_destroy(dist);
 
         // bind the matrix A to the solver
-        ierr = MPI_Barrier(gpuWorld); CHK;
+        ierr = MPI_Barrier(world); CHK;
         AMGX_solver_setup(solver, AmgXA);
 
         // connect (bind) vectors to the matrix
         AMGX_vector_bind(AmgXP, AmgXA);
         AMGX_vector_bind(AmgXRHS, AmgXA);
     }
-    ierr = MPI_Barrier(globalCpuWorld); CHK;
+    ierr = MPI_Barrier(world); CHK;
 
     // destroy temporary PETSc objects
     ierr = ISDestroy(&devIS); CHK;
@@ -106,21 +106,6 @@ PetscErrorCode AmgXSolver::getDevIS(const Mat &A, IS &devIS)
     // get index sets of A locally owned by each process
     // note that devIS is now a serial IS on each process
     ierr = MatGetOwnershipIS(A, &devIS, nullptr); CHK;
-
-    // concatenate index sets that belong to the same devWorld
-    // note that now devIS is a parallel IS of communicator devWorld
-    ierr = ISOnComm(devIS, devWorld, PETSC_USE_POINTER, &tempIS); CHK;
-    ierr = ISDestroy(&devIS); CHK;
-
-    // all gather in order to have all indices belong to a devWorld on the
-    // leading rank of that devWorld. THIS IS NOT EFFICIENT!!
-    // note that now devIS is again a serial IS on each process
-    ierr = ISAllGather(tempIS, &devIS); CHK;
-    ierr = ISDestroy(&tempIS); CHK;
-
-    // empty devIS on ranks other than the leading ranks in each devWorld
-    if (myDevWorldRank != 0)
-        ierr = ISGeneralSetIndices(devIS, 0, nullptr, PETSC_COPY_VALUES); CHK;
 
     // devIS is not guaranteed to be sorted. We sort it here.
     ierr = ISSort(devIS); CHK;
@@ -168,7 +153,7 @@ PetscErrorCode AmgXSolver::getLocalA(const Mat &A, const IS &devIS, Mat &localA)
     }
     else
     {
-        SETERRQ1(globalCpuWorld, PETSC_ERR_ARG_WRONG,
+        SETERRQ1(world, PETSC_ERR_ARG_WRONG,
                 "Mat type %s is not supported!\n", type);
     }
 
@@ -183,50 +168,7 @@ PetscErrorCode AmgXSolver::redistMat(const Mat &A, const IS &devIS, Mat &newA)
 
     PetscErrorCode      ierr;
 
-    if (gpuWorldSize == globalSize) // no redistributation required
-    {
-        newA = A;
-    }
-    else
-    {
-        IS      is;
-
-        // re-set the communicator of devIS to globalCpuWorld
-        ierr = ISOnComm(devIS, globalCpuWorld, PETSC_USE_POINTER, &is); CHK;
-
-        // redistribute the matrix A to newA
-        ierr = MatGetSubMatrix(A, is, is, MAT_INITIAL_MATRIX, &newA); CHK;
-
-        // get VecScatters between original data layout and the new one
-        ierr = getVecScatter(A, newA, is); CHK;
-
-        // destroy the temporary IS
-        ierr = ISDestroy(&is); CHK;
-    }
-
-    PetscFunctionReturn(0);
-}
-
-
-/* \implements AmgXSolver::getVecScatter */
-PetscErrorCode AmgXSolver::getVecScatter(
-        const Mat &A1, const Mat &A2, const IS &devIS)
-{
-    PetscFunctionBeginUser;
-
-    PetscErrorCode      ierr;
-
-    Vec                 tempLhs;
-    Vec                 tempRhs;
-
-    ierr = MatCreateVecs(A1, &tempLhs, &tempRhs); CHK;
-    ierr = MatCreateVecs(A2, &redistLhs, &redistRhs); CHK;
-
-    ierr = VecScatterCreate(tempLhs, devIS, redistLhs, devIS, &scatterLhs); CHK;
-    ierr = VecScatterCreate(tempRhs, devIS, redistRhs, devIS, &scatterRhs); CHK;
-
-    ierr = VecDestroy(&tempRhs); CHK;
-    ierr = VecDestroy(&tempLhs); CHK;
+    newA = A;
 
     PetscFunctionReturn(0);
 }
@@ -259,7 +201,7 @@ PetscErrorCode AmgXSolver::getLocalMatRawData(const Mat &localA,
 
     // check if the function worked
     if (! done)
-        SETERRQ(globalCpuWorld, PETSC_ERR_SIG, "MatGetRowIJ did not work!");
+        SETERRQ(world, PETSC_ERR_SIG, "MatGetRowIJ did not work!");
 
     // get data
     ierr = MatSeqAIJGetArray(localA, &rawData); CHK;
@@ -277,7 +219,7 @@ PetscErrorCode AmgXSolver::getLocalMatRawData(const Mat &localA,
 
     // check if the function worked
     if (! done)
-        SETERRQ(globalCpuWorld, PETSC_ERR_SIG, "MatRestoreRowIJ did not work!");
+        SETERRQ(world, PETSC_ERR_SIG, "MatRestoreRowIJ did not work!");
 
     // return ownership of memory space to PETSc
     ierr = MatSeqAIJRestoreArray(localA, &rawData); CHK;
@@ -312,37 +254,6 @@ PetscErrorCode AmgXSolver::destroyLocalA(const Mat &A, Mat &localA)
     PetscFunctionReturn(0);
 }
 
-/* \implements AmgXSolver::checkForContiguousPartitioning */
-PetscErrorCode AmgXSolver::checkForContiguousPartitioning(
-    const IS &devIS, PetscBool &isContiguous, std::vector<PetscInt> &partOffsets)
-{
-    PetscFunctionBeginUser;
-    PetscErrorCode      ierr;
-    PetscBool sorted;
-    PetscInt ismax= -2; // marker for "unsorted", allows to check after global sort
-
-    ierr = ISSorted(devIS, &sorted); CHK;
-    if (sorted)
-    {
-        ierr = ISGetMinMax(devIS, NULL, &ismax); CHK;
-    }
-    partOffsets.resize(gpuWorldSize);
-    ++ismax; // add 1 to allow reusing gathered ismax values as partition offsets for AMGX
-    MPI_Allgather(&ismax, 1, MPIU_INT, &partOffsets[0], 1, MPIU_INT, gpuWorld);
-    bool all_sorted = std::is_sorted(partOffsets.begin(), partOffsets.end())
-                        && partOffsets[0] != -1;
-    if (all_sorted)
-    {
-        partOffsets.insert(partOffsets.begin(), 0); // partition 0 always starts at 0
-        isContiguous = PETSC_TRUE;
-    }
-    else
-    {
-        isContiguous = PETSC_FALSE;
-    }
-    PetscFunctionReturn(0);
-}
-
 
 /* \implements AmgXSolver::getPartData */
 PetscErrorCode AmgXSolver::getPartData(
@@ -361,17 +272,17 @@ PetscErrorCode AmgXSolver::getPartData(
 
     ierr = ISGetLocalSize(devIS, &n); CHK;
 
-    if (gpuWorld != MPI_COMM_NULL)
+    if (world != MPI_COMM_NULL)
     {
         // check if sorted/contiguous, then we can skip expensive scatters
         checkForContiguousPartitioning(devIS, usesOffsets, partData);
         if (!usesOffsets)
         {
-            ierr = VecCreateMPI(gpuWorld, n, N, &tempMPI); CHK;
+            ierr = VecCreateMPI(world, n, N, &tempMPI); CHK;
 
             IS      is;
-            ierr = ISOnComm(devIS, gpuWorld, PETSC_USE_POINTER, &is); CHK;
-            ierr = VecISSet(tempMPI, is, (PetscScalar) myGpuWorldRank); CHK;
+            ierr = ISOnComm(devIS, world, PETSC_USE_POINTER, &is); CHK;
+            ierr = VecISSet(tempMPI, is, (PetscScalar) world_rank); CHK;
             ierr = ISDestroy(&is); CHK;
 
             ierr = VecScatterCreateToAll(tempMPI, &scatter, &tempSEQ); CHK;
@@ -391,7 +302,39 @@ PetscErrorCode AmgXSolver::getPartData(
             ierr = VecDestroy(&tempSEQ); CHK;
         }
     }
-    ierr = MPI_Barrier(globalCpuWorld); CHK;
+    ierr = MPI_Barrier(world); CHK;
 
+    PetscFunctionReturn(0);
+}
+
+
+/* \implements AmgXSolver::checkForContiguousPartitioning */
+PetscErrorCode AmgXSolver::checkForContiguousPartitioning(
+    const IS &devIS, PetscBool &isContiguous, std::vector<PetscInt> &partOffsets)
+{
+    PetscFunctionBeginUser;
+    PetscErrorCode      ierr;
+    PetscBool sorted;
+    PetscInt ismax= -2; // marker for "unsorted", allows to check after global sort
+
+    ierr = ISSorted(devIS, &sorted); CHK;
+    if (sorted)
+    {
+        ierr = ISGetMinMax(devIS, NULL, &ismax); CHK;
+    }
+    partOffsets.resize(world_size);
+    ++ismax; // add 1 to allow reusing gathered ismax values as partition offsets for AMGX
+    MPI_Allgather(&ismax, 1, MPIU_INT, &partOffsets[0], 1, MPIU_INT, world);
+    bool all_sorted = std::is_sorted(partOffsets.begin(), partOffsets.end())
+                        && partOffsets[0] != -1;
+    if (all_sorted)
+    {
+        partOffsets.insert(partOffsets.begin(), 0); // partition 0 always starts at 0
+        isContiguous = PETSC_TRUE;
+    }
+    else
+    {
+        isContiguous = PETSC_FALSE;
+    }
     PetscFunctionReturn(0);
 }

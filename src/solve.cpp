@@ -12,51 +12,8 @@
 # include "AmgXSolver.hpp"
 
 
-/* \implements AmgXSolver::solve */
-PetscErrorCode AmgXSolver::solve(Vec &p, Vec &b)
-{
-    PetscFunctionBeginUser;
-
-    PetscErrorCode      ierr;
-
-    if (globalSize != gpuWorldSize)
-    {
-        ierr = VecScatterBegin(scatterRhs,
-                b, redistRhs, INSERT_VALUES, SCATTER_FORWARD); CHK;
-        ierr = VecScatterBegin(scatterLhs,
-                p, redistLhs, INSERT_VALUES, SCATTER_FORWARD); CHK;
-
-        ierr = VecScatterEnd(scatterRhs,
-                b, redistRhs, INSERT_VALUES, SCATTER_FORWARD); CHK;
-        ierr = VecScatterEnd(scatterLhs,
-                p, redistLhs, INSERT_VALUES, SCATTER_FORWARD); CHK;
-
-        if (gpuWorld != MPI_COMM_NULL)
-        {
-            ierr = solve_real(redistLhs, redistRhs); CHK;
-        }
-        ierr = MPI_Barrier(globalCpuWorld); CHK;
-
-        ierr = VecScatterBegin(scatterLhs,
-                redistLhs, p, INSERT_VALUES, SCATTER_REVERSE); CHK;
-        ierr = VecScatterEnd(scatterLhs,
-                redistLhs, p, INSERT_VALUES, SCATTER_REVERSE); CHK;
-    }
-    else
-    {
-        if (gpuWorld != MPI_COMM_NULL)
-        {
-            ierr = solve_real(p, b); CHK;
-        }
-        ierr = MPI_Barrier(globalCpuWorld); CHK;
-    }
-
-    PetscFunctionReturn(0);
-}
-
-
 /* \implements AmgXSolver::solve_real */
-PetscErrorCode AmgXSolver::solve_real(Vec &p, Vec &b)
+PetscErrorCode AmgXSolver::solve(Vec &p, Vec &b)
 {
     PetscFunctionBeginUser;
 
@@ -81,14 +38,14 @@ PetscErrorCode AmgXSolver::solve_real(Vec &p, Vec &b)
     AMGX_vector_upload(AmgXRHS, size, 1, rhs);
 
     // solve
-    ierr = MPI_Barrier(gpuWorld); CHK;
+    ierr = MPI_Barrier(world); CHK;
     AMGX_solver_solve(solver, AmgXRHS, AmgXP);
 
     // get the status of the solver
     AMGX_solver_get_status(solver, &status);
 
     // check whether the solver successfully solve the problem
-    if (status != AMGX_SOLVE_SUCCESS) SETERRQ1(globalCpuWorld,
+    if (status != AMGX_SOLVE_SUCCESS) SETERRQ1(world,
             PETSC_ERR_CONV_FAILED, "AmgX solver failed to solve the system! "
             "The error code is %d.\n", status);
 
